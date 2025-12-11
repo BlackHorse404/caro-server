@@ -1,67 +1,67 @@
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
+require("dotenv").config();
 const { Server } = require("socket.io");
 
 const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
-
 const io = new Server(server, {
   cors: { origin: "*" }
 });
 
-/** ================== CONFIG ================== */
+/* ===========================================
+   CONFIG
+=========================================== */
 const ROOM_ID = "caro-room";
-const GAME_PASSWORD = "123456";   // password để vào game
-const TURN_TIME = 30;             // thời gian mỗi lượt (giây)
+const GAME_PASSWORD = process.env.GAME_PASSWORD || "123456";
+const TURN_TIME = 30;
 
-/** ================== GAME STATE ================== */
-// board["x,y"] = ".", "X", "O"
+/* ===========================================
+   GAME STATE
+=========================================== */
 let board = {};
 let turn = "X";
 let winner = null;
 let winLine = [];
 
-// timer
-let turnInterval = null;
 let timeLeft = TURN_TIME;
+let turnInterval = null;
 
-// room / game state
-let gameReady = false;  // đã đủ X & O chưa
-let gameStarted = false; // trận đã bắt đầu chưa
-let startConfirmed = { X: false, O: false }; // mỗi bên có bấm "bắt đầu" chưa
+// room state
+let gameReady = false;
+let gameStarted = false;
+let startConfirmed = { X: false, O: false };
 
-// socketId -> "X" | "O" | "SPECTATOR"
+// roles
 const roles = {};
-// lưu socket id của X / O
-const players = {
-  X: null,
-  O: null
-};
+const players = { X: null, O: null };
 
-/** ================== HELPER ================== */
-function getKey(x, y) {
+/* ===========================================
+   UTILITIES
+=========================================== */
+function key(x, y) {
   return `${x},${y}`;
 }
 
 function getCell(x, y) {
-  const v = board[getKey(x, y)];
-  return v === undefined ? "." : v;
+  return board[key(x, y)] ?? ".";
 }
 
 function setCell(x, y, v) {
-  board[getKey(x, y)] = v;
+  board[key(x, y)] = v;
 }
 
 // khởi tạo bảng 20x20
 function resetGame() {
   board = {};
   const size = 20;
-  for (let i = 0; i < size; i++) {
-    for (let j = 0; j < size; j++) {
-      board[getKey(i, j)] = ".";
+
+  for (let x = 0; x < size; x++) {
+    for (let y = 0; y < size; y++) {
+      board[key(x, y)] = ".";
     }
   }
 
@@ -69,11 +69,12 @@ function resetGame() {
   winner = null;
   winLine = [];
 
-  if (turnInterval) {
-    clearInterval(turnInterval);
-    turnInterval = null;
-  }
+  clearInterval(turnInterval);
+  turnInterval = null;
   timeLeft = TURN_TIME;
+
+  // clear last move (client sẽ tắt highlight)
+  io.to(ROOM_ID).emit("last_move", null);
 }
 
 function publicState() {
@@ -85,139 +86,149 @@ function publicState() {
   };
 }
 
-// tìm đường thắng (>= 5 quân liên tiếp)
+/* ===========================================
+   WIN CHECK
+=========================================== */
 function checkWin(x, y) {
-  const symbol = getCell(x, y);
-  if (symbol !== "X" && symbol !== "O") return null;
+  const s = getCell(x, y);
+  if (s !== "X" && s !== "O") return null;
 
   const dirs = [
-    [1, 0],  // dọc
-    [0, 1],  // ngang
-    [1, 1],  // chéo xuống phải
-    [1, -1]  // chéo xuống trái
+    [1, 0], // dọc
+    [0, 1], // ngang
+    [1, 1], // chéo xuống phải
+    [1, -1] // chéo xuống trái
   ];
 
-  for (const [dx, dy] of dirs) {
+  for (let [dx, dy] of dirs) {
     let line = [[x, y]];
 
-    // 1 phía
-    let i = x + dx;
-    let j = y + dy;
-    while (getCell(i, j) === symbol) {
+    let i = x + dx,
+      j = y + dy;
+    while (getCell(i, j) === s) {
       line.push([i, j]);
       i += dx;
       j += dy;
     }
 
-    // phía ngược lại
     i = x - dx;
     j = y - dy;
-    while (getCell(i, j) === symbol) {
+    while (getCell(i, j) === s) {
       line.push([i, j]);
       i -= dx;
       j -= dy;
     }
 
-    if (line.length >= 5) {
-      return line;
-    }
+    if (line.length >= 5) return line;
   }
 
   return null;
 }
 
-// tìm ô trống đầu tiên để auto đánh khi hết giờ
+/* ===========================================
+   AUTO MOVE
+=========================================== */
+
 function findFirstEmptyCell() {
-  for (const key in board) {
-    if (board[key] === ".") {
-      const [x, y] = key.split(",").map(Number);
+  for (let k in board) {
+    if (board[k] === ".") {
+      const [x, y] = k.split(",").map(Number);
       return { x, y };
     }
   }
   return null;
 }
 
-/** ================== TIMER ================== */
+function autoMove() {
+  if (!gameStarted || winner) return;
+
+  const cell = findFirstEmptyCell();
+  if (!cell) return;
+
+  const { x, y } = cell;
+  const currentSymbol = turn;
+
+  setCell(x, y, currentSymbol);
+
+  // ⭐ gửi vị trí vừa đánh
+  io.to(ROOM_ID).emit("last_move", { x, y, player: currentSymbol });
+
+  const line = checkWin(x, y);
+  if (line) {
+    winner = currentSymbol;
+    winLine = line;
+    io.to(ROOM_ID).emit("state", publicState());
+    return;
+  }
+
+  turn = turn === "X" ? "O" : "X";
+  io.to(ROOM_ID).emit("state", publicState());
+  startTurnTimer();
+}
+
+/* ===========================================
+   TURN TIMER
+=========================================== */
 
 function emitTimer() {
   io.to(ROOM_ID).emit("timer", timeLeft);
 }
 
 function startTurnTimer() {
-  if (turnInterval) {
-    clearInterval(turnInterval);
-    turnInterval = null;
-  }
+  clearInterval(turnInterval);
 
   timeLeft = TURN_TIME;
   emitTimer();
 
   turnInterval = setInterval(() => {
-    timeLeft -= 1;
+    timeLeft--;
     emitTimer();
 
     if (timeLeft <= 0) {
       clearInterval(turnInterval);
-      turnInterval = null;
       autoMove();
     }
   }, 1000);
 }
 
-// auto đánh khi hết giờ
-function autoMove() {
-  if (winner || !gameStarted) return;
+/* ===========================================
+   ROOM READY CHECK
+=========================================== */
 
-  const empty = findFirstEmptyCell();
-  if (!empty) return;
-
-  const { x, y } = empty;
-  const mySymbol = turn;
-
-  setCell(x, y, mySymbol);
-  const line = checkWin(x, y);
-
-  if (line) {
-    winner = mySymbol;
-    winLine = line;
-    io.to(ROOM_ID).emit("state", publicState());
-  } else {
-    turn = turn === "X" ? "O" : "X";
-    io.to(ROOM_ID).emit("state", publicState());
-    startTurnTimer();
-  }
-}
-
-// check nếu đã đủ 2 người chơi
-function checkAndAnnounceReady() {
+function checkRoomReady() {
   if (players.X && players.O) {
     gameReady = true;
     gameStarted = false;
     startConfirmed = { X: false, O: false };
-    io.to(ROOM_ID).emit("ready_to_start", {
-      message: "Đã đủ người chơi. Hãy xác nhận để bắt đầu!"
-    });
+
+    io.to(ROOM_ID).emit("ready_to_start");
   } else {
     gameReady = false;
     gameStarted = false;
     startConfirmed = { X: false, O: false };
-    io.to(ROOM_ID).emit("waiting_for_players", {
-      message: "Đang đợi đủ 2 người chơi..."
-    });
+
+    io.to(ROOM_ID).emit("waiting_for_players");
   }
 }
 
-/** ================== INIT ================== */
+/* ===========================================
+   INIT GAME
+=========================================== */
+
 resetGame();
 
-/** ================== SOCKET ================== */
+/* ===========================================
+   SOCKET.IO
+=========================================== */
 
 io.on("connection", (socket) => {
-  console.log()
-  console.log("Client connected:", socket.id, "IP:", socket.handshake.address);
+  console.log("⚡ Client connected:", socket.id);
+
   socket.join(ROOM_ID);
 
-  // verify password
+  /* -------------------------
+     PASSWORD
+  ------------------------- */
   socket.on("verify_password", (pass) => {
     if (pass === GAME_PASSWORD) {
       socket.emit("password_ok");
@@ -228,27 +239,32 @@ io.on("connection", (socket) => {
     }
   });
 
-  // gán role cho socket
-  let symbol;
+  /* -------------------------
+     ASSIGN ROLE
+  ------------------------- */
+
+  let symbol = "SPECTATOR";
+
   if (!players.X) {
     players.X = socket.id;
     symbol = "X";
   } else if (!players.O) {
     players.O = socket.id;
     symbol = "O";
-  } else {
-    symbol = "SPECTATOR";
   }
+
   roles[socket.id] = symbol;
 
   socket.emit("assign_role", { symbol });
   socket.emit("state", publicState());
   socket.emit("timer", timeLeft);
 
-  // báo trạng thái phòng
-  checkAndAnnounceReady();
+  checkRoomReady();
 
-  // xác nhận bắt đầu trận
+  /* -------------------------
+     CONFIRM START
+  ------------------------- */
+
   socket.on("confirm_start", () => {
     const mySymbol = roles[socket.id];
     if (mySymbol !== "X" && mySymbol !== "O") return;
@@ -259,38 +275,47 @@ io.on("connection", (socket) => {
     io.to(ROOM_ID).emit("start_confirm_update", startConfirmed);
 
     if (startConfirmed.X && startConfirmed.O) {
-      // cả 2 đã xác nhận => bắt đầu trận
       gameStarted = true;
-      resetGame(); // reset board, timer
+
+      resetGame();
       io.to(ROOM_ID).emit("state", publicState());
       io.to(ROOM_ID).emit("game_started");
+
+      // ⭐ xoá highlight nước cũ
+      io.to(ROOM_ID).emit("last_move", null);
+
       startTurnTimer();
     }
   });
 
-  // xử lý đánh cờ
+  /* -------------------------
+     MAKE MOVE
+  ------------------------- */
+
   socket.on("make_move", ({ x, y }) => {
     const mySymbol = roles[socket.id];
 
-    if (mySymbol !== "X" && mySymbol !== "O") return;
-    if (mySymbol !== turn) return;
     if (!gameStarted) return;
     if (winner) return;
+    if (mySymbol !== turn) return;
+    if (mySymbol !== "X" && mySymbol !== "O") return;
 
     if (typeof x !== "number" || typeof y !== "number") return;
     if (getCell(x, y) !== ".") return;
 
     setCell(x, y, mySymbol);
+
+    // ⭐ gửi nước đi cuối cùng cho client
+    io.to(ROOM_ID).emit("last_move", { x, y, player: mySymbol });
+
     const line = checkWin(x, y);
 
     if (line) {
       winner = mySymbol;
       winLine = line;
       io.to(ROOM_ID).emit("state", publicState());
-      if (turnInterval) {
-        clearInterval(turnInterval);
-        turnInterval = null;
-      }
+
+      clearInterval(turnInterval);
     } else {
       turn = turn === "X" ? "O" : "X";
       io.to(ROOM_ID).emit("state", publicState());
@@ -298,20 +323,30 @@ io.on("connection", (socket) => {
     }
   });
 
-  // reset game (chỉ X/O được reset)
+  /* -------------------------
+     RESET GAME
+  ------------------------- */
+
   socket.on("reset_game", () => {
     const mySymbol = roles[socket.id];
-    if (mySymbol === "X" || mySymbol === "O") {
-      resetGame();
-      gameStarted = false;
-      startConfirmed = { X: false, O: false };
-      io.to(ROOM_ID).emit("state", publicState());
-      checkAndAnnounceReady(); // vẫn đủ người -> lại yêu cầu xác nhận bắt đầu
-    }
+    if (mySymbol !== "X" && mySymbol !== "O") return;
+
+    resetGame();
+    gameStarted = false;
+    startConfirmed = { X: false, O: false };
+
+    io.to(ROOM_ID).emit("state", publicState());
+
+    checkRoomReady();
   });
 
+  /* -------------------------
+     DISCONNECT
+  ------------------------- */
+
   socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
+    console.log("❌ Client disconnected:", socket.id);
+
     const mySymbol = roles[socket.id];
 
     if (mySymbol === "X") players.X = null;
@@ -319,20 +354,18 @@ io.on("connection", (socket) => {
 
     delete roles[socket.id];
 
-    // nếu 1 trong 2 người chơi rời -> reset ván & chờ người mới
     resetGame();
-    gameReady = false;
-    gameStarted = false;
-    startConfirmed = { X: false, O: false };
+    checkRoomReady();
+
     io.to(ROOM_ID).emit("state", publicState());
-    io.to(ROOM_ID).emit("waiting_for_players", {
-      message: "Đang đợi đủ 2 người chơi..."
-    });
   });
 });
 
-/** ================== START SERVER ================== */
+/* ===========================================
+   START SERVER (Render.com compatible)
+=========================================== */
 
-server.listen(3001, () => {
-  console.log("🔥 Caro Infinite Server running on port 3001");
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => {
+  console.log("🔥 Caro realtime server running on port", PORT);
 });

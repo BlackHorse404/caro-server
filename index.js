@@ -367,7 +367,7 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 3001;
 
-app.get('/', (req, res) => {
+app.get('/info', (req, res) => {
   res.send('Caro Server Is Online');
 });
 

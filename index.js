@@ -6,6 +6,11 @@ const { Server } = require("socket.io");
 
 const app = express();
 app.use(cors());
+app.use(express.json());
+const path = require('path');
+
+// serve static files from public/
+app.use(express.static(path.join(__dirname, 'public')));
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -38,6 +43,9 @@ let startConfirmed = { X: false, O: false };
 // roles
 const roles = {};
 const players = { X: null, O: null };
+
+// session store for admin
+const sessions = {}; // { socketId: { id, connectedAt, ip, role } }
 
 /* ===========================================
    UTILITIES
@@ -224,6 +232,14 @@ resetGame();
 io.on("connection", (socket) => {
   console.log("⚡ Client connected:", socket.id);
 
+  // record session
+  sessions[socket.id] = {
+    id: socket.id,
+    connectedAt: new Date().toISOString(),
+    ip: socket.handshake.address || null,
+    role: null
+  };
+
   socket.join(ROOM_ID);
 
   /* -------------------------
@@ -254,6 +270,12 @@ io.on("connection", (socket) => {
   }
 
   roles[socket.id] = symbol;
+
+  // update session role
+  if (sessions[socket.id]) sessions[socket.id].role = symbol;
+
+  // tell client its socket id
+  socket.emit('session', { id: socket.id });
 
   socket.emit("assign_role", { symbol });
   socket.emit("state", publicState());
@@ -354,6 +376,9 @@ io.on("connection", (socket) => {
 
     delete roles[socket.id];
 
+    // remove from session store
+    delete sessions[socket.id];
+
     resetGame();
     checkRoomReady();
 
@@ -362,13 +387,51 @@ io.on("connection", (socket) => {
 });
 
 /* ===========================================
-   START SERVER (Render.com compatible)
+   START SERVER
 =========================================== */
 
 const PORT = process.env.PORT || 3001;
 
 app.get('/info', (req, res) => {
   res.send('Caro Server Is Online');
+});
+
+// --- Admin middleware ---
+function checkAdmin(req, res, next) {
+  const pass = req.get('x-admin-pass') || req.query.pass || req.body && req.body.pass;
+  const adminPass = process.env.ADMIN_PASSWORD || process.env.GAME_PASSWORD || "123456";
+  if (pass && pass === adminPass) return next();
+  res.status(401).send('Unauthorized');
+}
+
+// Admin: serve simple page
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+
+// Admin: list sessions
+app.get('/admin/sessions', checkAdmin, (req, res) => {
+  const list = Object.values(sessions).map(s => ({ id: s.id, connectedAt: s.connectedAt, ip: s.ip, role: s.role }));
+  res.json(list);
+});
+
+// Admin: disconnect session
+app.delete('/admin/sessions/:id', checkAdmin, (req, res) => {
+  const id = req.params.id;
+  const socket = io.sockets.sockets.get(id);
+  if (!socket) {
+    // maybe already gone
+    delete sessions[id];
+    return res.status(404).json({ ok: false, message: 'socket not found' });
+  }
+
+  try {
+    socket.disconnect(true);
+    // session will be removed on disconnect handler
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ ok: false, message: String(err) });
+  }
 });
 
 server.listen(PORT, () => {

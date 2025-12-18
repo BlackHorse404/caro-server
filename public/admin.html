@@ -1,0 +1,136 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Caro Admin</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root{--bg:#f6f8fa;--card:#fff;--accent:#2b6cb0;--danger:#e53e3e;--muted:#6b7280}
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,Arial;background:var(--bg);color:#111}
+    .wrap{max-width:980px;margin:28px auto;padding:20px}
+    .card{background:var(--card);border-radius:10px;box-shadow:0 6px 18px rgba(15,23,42,0.06);padding:18px}
+    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+    h1{font-size:18px;margin:0}
+    .controls{display:flex;gap:8px;align-items:center}
+    input[type="text"], input[type="password"]{padding:8px 10px;border:1px solid #e6e9ef;border-radius:8px}
+    button{background:var(--accent);color:#fff;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
+    button.ghost{background:transparent;color:var(--accent);border:1px solid rgba(43,108,176,0.12)}
+    button.danger{background:var(--danger)}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #f1f5f9;font-size:13px}
+    th{color:var(--muted);font-weight:600}
+    .small{font-size:12px;color:var(--muted)}
+    .login-row{display:flex;gap:8px;align-items:center}
+    .footer{margin-top:12px;font-size:13px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="header">
+        <h1>Caro — Admin Panel</h1>
+        <div class="controls">
+          <div id="status" class="small">Not authenticated</div>
+        </div>
+      </div>
+
+      <div id="login-area" class="card" style="padding:12px;margin-bottom:12px;">
+        <form id="login-form" class="login-row" onsubmit="doLogin(event)">
+          <input id="password" type="password" placeholder="Enter admin password" style="min-width:220px"/>
+          <button type="submit">Login</button>
+          <button type="button" class="ghost" onclick="testAnonymous()">Test (no auth)</button>
+        </form>
+      </div>
+
+      <div id="admin-ui" style="display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="display:flex;gap:8px;align-items:center">
+            <input id="q" type="text" placeholder="Filter by id/role/ip" oninput="load()" />
+            <button onclick="load()" class="ghost">Refresh</button>
+          </div>
+          <div class="controls">
+            <div class="small" id="updated">Updated: —</div>
+            <button onclick="logout()" class="ghost">Logout</button>
+          </div>
+        </div>
+
+        <table id="sessions-table">
+          <thead>
+            <tr><th>Socket ID</th><th>Role</th><th>IP</th><th>Connected</th><th></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="footer">Tip: use the filter box to quickly find a session.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let pass = null;
+
+    async function api(path, opts) {
+      opts = opts || {};
+      opts.headers = opts.headers || {};
+      if (pass) opts.headers['x-admin-pass'] = pass;
+      const resp = await fetch(path, opts);
+      if (resp.status === 401) {
+        setStatus('Not authenticated');
+        showLogin();
+        throw new Error('Unauthorized');
+      }
+      return resp;
+    }
+
+    function setStatus(t){ document.getElementById('status').innerText = t }
+    function showLogin(){ document.getElementById('admin-ui').style.display='none'; document.getElementById('login-area').style.display='block'; }
+    function showAdmin(){ document.getElementById('login-area').style.display='none'; document.getElementById('admin-ui').style.display='block'; }
+
+    async function doLogin(e){
+      e && e.preventDefault();
+      pass = document.getElementById('password').value.trim();
+      if(!pass) { alert('Enter password'); return }
+      try{
+        const r = await api('/admin/sessions');
+        if(!r.ok) { alert('Invalid password'); pass=null; return }
+        setStatus('Authenticated');
+        showAdmin();
+        await load();
+      }catch(err){ pass=null; alert('Invalid password') }
+    }
+
+    async function load(){
+      try{
+        const q = document.getElementById('q').value.trim().toLowerCase();
+        const resp = await api('/admin/sessions');
+        const data = await resp.json();
+        const tbody = document.querySelector('#sessions-table tbody');
+        tbody.innerHTML = '';
+        const filtered = data.filter(s => {
+          if(!q) return true;
+          return s.id.toLowerCase().includes(q) || (s.role||'').toLowerCase().includes(q) || (s.ip||'').toLowerCase().includes(q);
+        });
+        for(const s of filtered){
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td style="max-width:420px;overflow:hidden;text-overflow:ellipsis">${s.id}</td><td>${s.role||''}</td><td>${s.ip||''}</td><td>${s.connectedAt}</td><td><button data-id="${s.id}">Disconnect</button></td>`;
+          tbody.appendChild(tr);
+        }
+        document.querySelectorAll('button[data-id]').forEach(b=>b.onclick = async ()=>{
+          const id = b.getAttribute('data-id');
+          if(!confirm('Disconnect '+id+'?')) return;
+          const r = await api('/admin/sessions/'+encodeURIComponent(id), { method: 'DELETE' });
+          if(r.ok) load(); else alert('Failed');
+        });
+        document.getElementById('updated').innerText = 'Updated: '+new Date().toLocaleTimeString();
+      }catch(err){ console.warn(err); }
+    }
+
+    function logout(){ pass=null; setStatus('Not authenticated'); showLogin(); }
+
+    // helper to test unauthenticated view
+    function testAnonymous(){ alert('Admin APIs require authentication; please login.'); }
+
+    // initial state
+    showLogin();
+  </script>
+</body>
+</html>
